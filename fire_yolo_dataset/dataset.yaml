@@ -1,8 +1,0 @@
-# Fire Detection Dataset Configuration
-path: /Users/qinhao/Desktop/fireDatasetBuild/fire_yolo_dataset
-train: images
-val: images
-
-# Classes
-nc: 1  # number of classes
-names: ['fire']  # class names
