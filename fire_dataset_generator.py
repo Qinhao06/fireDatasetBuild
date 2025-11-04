@@ -54,14 +54,40 @@ class FireDatasetGenerator:
             print(f"加载火焰图像失败 {fire_path}: {e}")
             return None
     
-    def random_transform_fire(self, fire_img):
+    def random_transform_fire(self, fire_img, bg_size=None):
         """随机变换火焰图像：缩放、旋转、调整亮度等"""
         if fire_img is None:
             return None
         h, w = fire_img.shape[:2]
         
-        # 随机缩放 (0.3-1.5倍)
-        scale = random.uniform(0.3, 1.5)
+        # 根据背景大小调整缩放范围
+        if bg_size is not None:
+            bg_h, bg_w = bg_size
+            # 计算相对于背景的最大允许尺寸
+            max_fire_w = bg_w * 0.25  # 火焰最大宽度不超过背景的25%
+            max_fire_h = bg_h * 0.35  # 火焰最大高度不超过背景的35%
+            min_fire_w = bg_w * 0.05  # 火焰最小宽度不少于背景的5%
+            min_fire_h = bg_h * 0.08  # 火焰最小高度不少于背景的8%
+            
+            # 计算缩放范围
+            max_scale_w = max_fire_w / w
+            max_scale_h = max_fire_h / h
+            min_scale_w = min_fire_w / w
+            min_scale_h = min_fire_h / h
+            
+            # 取更严格的限制
+            max_scale = min(max_scale_w, max_scale_h, 0.9)  # 最大不超过1.2倍
+            min_scale = max(min_scale_w, min_scale_h, 0.2)  # 最小不少于0.2倍
+            
+            # 确保min_scale不大于max_scale
+            if min_scale > max_scale:
+                min_scale = max_scale * 0.8
+        else:
+            # 默认缩放范围
+            min_scale, max_scale = 0.3, 0.9
+        
+        # 随机缩放
+        scale = random.uniform(min_scale, max_scale)
         new_w, new_h = int(w * scale), int(h * scale)
         fire_img = cv2.resize(fire_img, (new_w, new_h))
         
@@ -87,6 +113,31 @@ class FireDatasetGenerator:
         fire_img[:,:,:3] = np.clip(fire_img[:,:,:3] * brightness, 0, 255)
         
         return fire_img
+    
+    def get_adaptive_fire_size_range(self, bg_size, fire_count):
+        """根据背景大小和火焰数量，自适应调整火焰尺寸范围"""
+        bg_h, bg_w = bg_size
+        
+        # 根据火焰数量调整尺寸 - 火焰越多，单个火焰应该越小
+        if fire_count == 1:
+            # 单个火焰可以稍大一些
+            max_w_ratio, max_h_ratio = 0.35, 0.45
+            min_w_ratio, min_h_ratio = 0.08, 0.12
+        elif fire_count == 2:
+            # 两个火焰，中等大小
+            max_w_ratio, max_h_ratio = 0.25, 0.35
+            min_w_ratio, min_h_ratio = 0.06, 0.10
+        else:
+            # 多个火焰，每个都应该较小
+            max_w_ratio, max_h_ratio = 0.20, 0.30
+            min_w_ratio, min_h_ratio = 0.05, 0.08
+        
+        return {
+            'max_width': int(bg_w * max_w_ratio),
+            'max_height': int(bg_h * max_h_ratio),
+            'min_width': int(bg_w * min_w_ratio),
+            'min_height': int(bg_h * min_h_ratio)
+        }
     
     def check_overlap(self, new_bbox, existing_bboxes, min_distance=0.1):
         """检查新的边界框是否与已存在的边界框重叠"""
@@ -119,10 +170,35 @@ class FireDatasetGenerator:
         bg_h, bg_w = background_img.shape[:2]
         fire_h, fire_w = fire_img.shape[:2]
         
-        # 确保火焰图像不超过背景图像大小
-        if fire_w > bg_w * 0.6 or fire_h > bg_h * 0.6:
-            scale = min(bg_w * 0.6 / fire_w, bg_h * 0.6 / fire_h)
-            new_fire_w, new_fire_h = int(fire_w * scale), int(fire_h * scale)
+        # 更严格的尺寸控制 - 确保火焰不会过大
+        max_width_ratio = 0.3   # 火焰最大宽度不超过背景的30%
+        max_height_ratio = 0.4  # 火焰最大高度不超过背景的40%
+        min_width_ratio = 0.05  # 火焰最小宽度不少于背景的5%
+        min_height_ratio = 0.08 # 火焰最小高度不少于背景的8%
+        
+        # 检查并调整火焰尺寸
+        needs_resize = False
+        scale_w = scale_h = 1.0
+        
+        if fire_w > bg_w * max_width_ratio:
+            scale_w = (bg_w * max_width_ratio) / fire_w
+            needs_resize = True
+        elif fire_w < bg_w * min_width_ratio:
+            scale_w = (bg_w * min_width_ratio) / fire_w
+            needs_resize = True
+            
+        if fire_h > bg_h * max_height_ratio:
+            scale_h = (bg_h * max_height_ratio) / fire_h
+            needs_resize = True
+        elif fire_h < bg_h * min_height_ratio:
+            scale_h = (bg_h * min_height_ratio) / fire_h
+            needs_resize = True
+        
+        if needs_resize:
+            # 使用更严格的缩放比例（取较小值以确保两个维度都符合要求）
+            final_scale = min(scale_w, scale_h)
+            new_fire_w = max(int(fire_w * final_scale), 1)
+            new_fire_h = max(int(fire_h * final_scale), 1)
             fire_img = cv2.resize(fire_img, (new_fire_w, new_fire_h))
             fire_h, fire_w = new_fire_h, new_fire_w
         
@@ -194,6 +270,10 @@ class FireDatasetGenerator:
                 existing_bboxes = []  # 存储已放置的火焰边界框
                 
                 successful_fires = 0
+                # 获取自适应的火焰尺寸范围
+                bg_h, bg_w = background.shape[:2]
+                size_limits = self.get_adaptive_fire_size_range((bg_h, bg_w), num_fires)
+                
                 for fire_attempt in range(num_fires * 3):  # 给更多尝试机会
                     if successful_fires >= num_fires:
                         break
@@ -205,11 +285,26 @@ class FireDatasetGenerator:
                     if fire_img is None:
                         continue
                     
-                    # 随机变换火焰图像
-                    transformed_fire = self.random_transform_fire(fire_img)
+                    # 随机变换火焰图像，传入背景尺寸进行自适应缩放
+                    transformed_fire = self.random_transform_fire(fire_img, bg_size=(bg_h, bg_w))
                     
                     if transformed_fire is None:
                         continue
+                    
+                    # 额外的尺寸检查和调整
+                    t_h, t_w = transformed_fire.shape[:2]
+                    if (t_w > size_limits['max_width'] or t_h > size_limits['max_height'] or
+                        t_w < size_limits['min_width'] or t_h < size_limits['min_height']):
+                        # 重新调整到合适的尺寸
+                        target_w = random.randint(size_limits['min_width'], size_limits['max_width'])
+                        target_h = random.randint(size_limits['min_height'], size_limits['max_height'])
+                        # 保持宽高比
+                        aspect_ratio = t_w / t_h
+                        if target_w / target_h > aspect_ratio:
+                            target_w = int(target_h * aspect_ratio)
+                        else:
+                            target_h = int(target_w / aspect_ratio)
+                        transformed_fire = cv2.resize(transformed_fire, (target_w, target_h))
                     
                     # 将火焰贴到背景上，传入已存在的边界框避免重叠
                     result_img, bbox = self.paste_fire_on_background(result_img, transformed_fire, existing_bboxes)
