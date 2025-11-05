@@ -16,9 +16,18 @@ class FireDatasetGenerator:
         self.images_output_dir.mkdir(parents=True, exist_ok=True)
         self.labels_output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 获取文件列表
-        self.fire_images = list(self.fire_images_dir.glob("*.png")) + list(self.fire_images_dir.glob("*.jpg"))
-        self.background_images = list(self.background_dir.glob("*.jpg")) + list(self.background_dir.glob("*.png"))
+        # 获取文件列表 - 递归搜索所有子文件夹
+        self.fire_images = (list(self.fire_images_dir.glob("*.png")) + 
+                           list(self.fire_images_dir.glob("*.jpg")) +
+                           list(self.fire_images_dir.glob("*.jpeg")))
+        
+        # 递归获取background_dir及其所有子文件夹中的图片
+        self.background_images = (list(self.background_dir.rglob("*.jpg")) + 
+                                 list(self.background_dir.rglob("*.png")) +
+                                 list(self.background_dir.rglob("*.jpeg")) +
+                                 list(self.background_dir.rglob("*.JPG")) +
+                                 list(self.background_dir.rglob("*.PNG")) +
+                                 list(self.background_dir.rglob("*.JPEG")))
         
         print(f"找到 {len(self.fire_images)} 张火焰图像")
         print(f"找到 {len(self.background_images)} 张背景图像")
@@ -54,8 +63,179 @@ class FireDatasetGenerator:
             print(f"加载火焰图像失败 {fire_path}: {e}")
             return None
     
-    def random_transform_fire(self, fire_img, bg_size=None):
-        """随机变换火焰图像：缩放、旋转、调整亮度等"""
+    def analyze_background_brightness(self, background_img, sample_regions=5):
+        """分析背景图片的明暗程度"""
+        bg_h, bg_w = background_img.shape[:2]
+        
+        # 转换为灰度图进行亮度分析
+        gray_bg = cv2.cvtColor(background_img, cv2.COLOR_BGR2GRAY)
+        
+        # 计算整体平均亮度
+        overall_brightness = np.mean(gray_bg)
+        
+        # 随机采样多个区域计算局部亮度
+        local_brightness_values = []
+        region_size = min(bg_h, bg_w) // 4  # 采样区域大小
+        
+        for _ in range(sample_regions):
+            # 随机选择采样区域
+            start_x = random.randint(0, max(0, bg_w - region_size))
+            start_y = random.randint(0, max(0, bg_h - region_size))
+            end_x = min(start_x + region_size, bg_w)
+            end_y = min(start_y + region_size, bg_h)
+            
+            region = gray_bg[start_y:end_y, start_x:end_x]
+            local_brightness_values.append(np.mean(region))
+        
+        # 计算局部亮度的平均值和标准差
+        local_avg_brightness = np.mean(local_brightness_values)
+        brightness_std = np.std(local_brightness_values)
+        
+        # 综合评估亮度（权重：整体70%，局部30%）
+        final_brightness = 0.7 * overall_brightness + 0.3 * local_avg_brightness
+        
+        return {
+            'brightness': final_brightness,  # 0-255
+            'brightness_std': brightness_std,  # 亮度变化程度
+            'brightness_ratio': final_brightness / 255.0  # 归一化亮度 0-1
+        }
+
+    def analyze_fire_brightness(self, fire_img):
+        """分析火焰图像的亮度特征"""
+        # 分离RGB通道
+        if fire_img.shape[2] == 4:
+            fire_rgb = fire_img[:,:,:3]
+            alpha = fire_img[:,:,3]
+            # 只分析有效像素（alpha > 0的区域）
+            valid_mask = alpha > 50  # 忽略几乎透明的像素
+        else:
+            fire_rgb = fire_img
+            valid_mask = np.ones(fire_rgb.shape[:2], dtype=bool)
+        
+        if not np.any(valid_mask):
+            return {'brightness': 128, 'brightness_ratio': 0.5}
+        
+        # 转换为灰度并计算有效区域亮度
+        gray_fire = cv2.cvtColor(fire_rgb, cv2.COLOR_BGR2GRAY)
+        valid_pixels = gray_fire[valid_mask]
+        
+        # 计算火焰的整体亮度
+        fire_brightness = np.mean(valid_pixels)
+        
+        # 分析火焰的亮度分布
+        fire_brightness_std = np.std(valid_pixels)
+        
+        # 计算火焰的"热度"（红色和黄色成分）
+        red_component = np.mean(fire_rgb[:,:,2][valid_mask])  # Red channel
+        green_component = np.mean(fire_rgb[:,:,1][valid_mask])  # Green channel
+        blue_component = np.mean(fire_rgb[:,:,0][valid_mask])  # Blue channel
+        
+        # 计算火焰的色温特征（红+绿相对于蓝的比例）
+        warmth_ratio = (red_component + green_component) / max(blue_component, 1)
+        
+        return {
+            'brightness': fire_brightness,
+            'brightness_ratio': fire_brightness / 255.0,
+            'brightness_std': fire_brightness_std,
+            'warmth_ratio': warmth_ratio,
+            'red_intensity': red_component,
+            'green_intensity': green_component,
+            'blue_intensity': blue_component
+        }
+
+    def adaptive_fire_processing(self, fire_img, bg_brightness_info):
+        """根据火焰和背景的亮度对比自适应处理火焰图像"""
+        # 分析火焰本身的亮度特征
+        fire_info = self.analyze_fire_brightness(fire_img)
+        
+        bg_brightness_ratio = bg_brightness_info['brightness_ratio']
+        fire_brightness_ratio = fire_info['brightness_ratio']
+        
+        # 计算亮度对比度（火焰相对于背景的亮度比）
+        brightness_contrast = fire_brightness_ratio / max(bg_brightness_ratio, 0.1)
+        
+        # 分离RGB通道和Alpha通道
+        if fire_img.shape[2] == 4:
+            fire_rgb = fire_img[:,:,:3].astype(np.float32)
+            alpha = fire_img[:,:,3]
+        else:
+            fire_rgb = fire_img.astype(np.float32)
+            alpha = None
+        
+        # 计算理想的火焰亮度（基于环境亮度的适应性调整）
+        # 火焰应该比背景亮，但整体亮度要与环境匹配
+        
+        if bg_brightness_ratio < 0.2:  # 很暗的背景（如夜晚）
+            # 在很暗的环境中，火焰也应该相对较暗，但要保持足够的对比度
+            target_brightness_ratio = random.uniform(0.4, 0.7)  # 目标亮度比背景高2-3倍
+            brightness_factor = target_brightness_ratio / max(fire_brightness_ratio, 0.1)
+            brightness_factor = np.clip(brightness_factor, 0.6, 1.4)  # 限制调整范围
+            
+            # 增强对比度和暖色调，让火焰在暗环境中更突出
+            contrast_factor = random.uniform(1.3, 1.6)
+            fire_rgb[:,:,2] = np.clip(fire_rgb[:,:,2] * random.uniform(1.1, 1.2), 0, 255)  # Red
+            fire_rgb[:,:,1] = np.clip(fire_rgb[:,:,1] * random.uniform(1.05, 1.1), 0, 255)  # Green
+            
+        elif bg_brightness_ratio < 0.4:  # 较暗的背景（如黄昏）
+            # 火焰亮度适中，保持与环境的协调
+            target_brightness_ratio = random.uniform(0.5, 0.8)
+            brightness_factor = target_brightness_ratio / max(fire_brightness_ratio, 0.1)
+            brightness_factor = np.clip(brightness_factor, 0.7, 1.3)
+            
+            contrast_factor = random.uniform(1.2, 1.4)
+            fire_rgb[:,:,2] = np.clip(fire_rgb[:,:,2] * random.uniform(1.05, 1.15), 0, 255)  # Red
+            
+        elif bg_brightness_ratio < 0.6:  # 中等亮度背景（如室内光线）
+            # 保持火焰的自然亮度
+            target_brightness_ratio = random.uniform(0.6, 0.85)
+            brightness_factor = target_brightness_ratio / max(fire_brightness_ratio, 0.1)
+            brightness_factor = np.clip(brightness_factor, 0.8, 1.2)
+            
+            contrast_factor = random.uniform(1.1, 1.3)
+            
+        else:  # 较亮的背景（如白天室外）
+            # 在明亮环境中，火焰应该显得相对暗淡但仍可见
+            if bg_brightness_ratio > 0.8:  # 非常亮的背景
+                target_brightness_ratio = random.uniform(0.6, 0.8)  # 火焰不能太亮
+            else:
+                target_brightness_ratio = random.uniform(0.7, 0.9)
+            
+            brightness_factor = target_brightness_ratio / max(fire_brightness_ratio, 0.1)
+            brightness_factor = np.clip(brightness_factor, 0.6, 1.1)
+            
+            contrast_factor = random.uniform(0.9, 1.2)
+            
+            # 在明亮背景中降低饱和度，让火焰更自然
+            hsv = cv2.cvtColor(fire_rgb.astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+            hsv[:,:,1] *= random.uniform(0.85, 0.95)  # 降低饱和度
+            fire_rgb = cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+        
+        # 应用亮度调整
+        fire_rgb = fire_rgb * brightness_factor
+        
+        # 应用对比度调整
+        fire_rgb = np.clip((fire_rgb - 128) * contrast_factor + 128, 0, 255)
+        
+        # 根据环境复杂度添加细微变化
+        if bg_brightness_info['brightness_std'] > 25:  # 背景明暗变化较大
+            # 添加轻微的亮度变化，模拟环境光影响
+            noise_strength = random.uniform(0.01, 0.03)
+            brightness_noise = np.random.normal(1.0, noise_strength, fire_rgb.shape[:2])
+            brightness_noise = np.expand_dims(brightness_noise, axis=2)
+            fire_rgb = np.clip(fire_rgb * brightness_noise, 0, 255)
+        
+        # 重新组合图像
+        if alpha is not None:
+            result = np.zeros((fire_rgb.shape[0], fire_rgb.shape[1], 4), dtype=np.uint8)
+            result[:,:,:3] = fire_rgb.astype(np.uint8)
+            result[:,:,3] = alpha
+        else:
+            result = fire_rgb.astype(np.uint8)
+        
+        return result
+
+    def random_transform_fire(self, fire_img, bg_size=None, background_img=None):
+        """随机变换火焰图像：缩放、旋转、根据背景自适应调整亮度等"""
         if fire_img is None:
             return None
         h, w = fire_img.shape[:2]
@@ -108,9 +288,14 @@ class FireDatasetGenerator:
         
         fire_img = cv2.warpAffine(fire_img, rotation_matrix, (new_w_rot, new_h_rot))
         
-        # 随机调整亮度和对比度
-        brightness = random.uniform(0.7, 1.3)
-        fire_img[:,:,:3] = np.clip(fire_img[:,:,:3] * brightness, 0, 255)
+        # 根据背景图像自适应调整火焰外观
+        if background_img is not None:
+            bg_brightness_info = self.analyze_background_brightness(background_img)
+            fire_img = self.adaptive_fire_processing(fire_img, bg_brightness_info)
+        else:
+            # 如果没有背景信息，使用原来的随机调整方式
+            brightness = random.uniform(0.7, 1.3)
+            fire_img[:,:,:3] = np.clip(fire_img[:,:,:3] * brightness, 0, 255)
         
         return fire_img
     
@@ -121,16 +306,16 @@ class FireDatasetGenerator:
         # 根据火焰数量调整尺寸 - 火焰越多，单个火焰应该越小
         if fire_count == 1:
             # 单个火焰可以稍大一些
-            max_w_ratio, max_h_ratio = 0.35, 0.45
-            min_w_ratio, min_h_ratio = 0.08, 0.12
+            max_w_ratio, max_h_ratio = 0.15, 0.35
+            min_w_ratio, min_h_ratio = 0.01, 0.02
         elif fire_count == 2:
             # 两个火焰，中等大小
-            max_w_ratio, max_h_ratio = 0.25, 0.35
-            min_w_ratio, min_h_ratio = 0.06, 0.10
+            max_w_ratio, max_h_ratio = 0.10, 0.35
+            min_w_ratio, min_h_ratio = 0.01, 0.02
         else:
             # 多个火焰，每个都应该较小
             max_w_ratio, max_h_ratio = 0.20, 0.30
-            min_w_ratio, min_h_ratio = 0.05, 0.08
+            min_w_ratio, min_h_ratio = 0.01, 0.02
         
         return {
             'max_width': int(bg_w * max_w_ratio),
@@ -285,8 +470,8 @@ class FireDatasetGenerator:
                     if fire_img is None:
                         continue
                     
-                    # 随机变换火焰图像，传入背景尺寸进行自适应缩放
-                    transformed_fire = self.random_transform_fire(fire_img, bg_size=(bg_h, bg_w))
+                    # 随机变换火焰图像，传入背景尺寸和背景图像进行自适应处理
+                    transformed_fire = self.random_transform_fire(fire_img, bg_size=(bg_h, bg_w), background_img=background)
                     
                     if transformed_fire is None:
                         continue
@@ -362,7 +547,7 @@ class FireDatasetGenerator:
 def main():
     # 配置路径
     fire_images_dir = "fire-photo"
-    background_dir = "middle_photo/fire-scene-photo"
+    background_dir = "middle_photo"
     output_dir = "fire_yolo_dataset"
     
     # 创建数据集生成器
@@ -370,7 +555,7 @@ def main():
     
     # 生成数据集
     generator.generate_dataset(
-        num_images=4000,  # 生成500张图像
+        num_images=100,  # 生成500张图像
         fires_per_image_range=(1, 2)  # 每张图像1-2个火焰
     )
 
