@@ -17,9 +17,12 @@ class FireDatasetGenerator:
         self.labels_output_dir.mkdir(parents=True, exist_ok=True)
         
         # 获取文件列表 - 递归搜索所有子文件夹
-        self.fire_images = (list(self.fire_images_dir.glob("*.png")) + 
-                           list(self.fire_images_dir.glob("*.jpg")) +
-                           list(self.fire_images_dir.glob("*.jpeg")))
+        self.fire_images = (list(self.fire_images_dir.rglob("*.png")) + 
+                           list(self.fire_images_dir.rglob("*.jpg")) +
+                           list(self.fire_images_dir.rglob("*.jpeg")) +
+                           list(self.fire_images_dir.rglob("*.PNG")) +
+                           list(self.fire_images_dir.rglob("*.JPG")) +
+                           list(self.fire_images_dir.rglob("*.JPEG")))
         
         # 递归获取background_dir及其所有子文件夹中的图片
         self.background_images = (list(self.background_dir.rglob("*.jpg")) + 
@@ -306,15 +309,15 @@ class FireDatasetGenerator:
         # 根据火焰数量调整尺寸 - 火焰越多，单个火焰应该越小
         if fire_count == 1:
             # 单个火焰可以稍大一些
-            max_w_ratio, max_h_ratio = 0.15, 0.35
+            max_w_ratio, max_h_ratio = 0.3, 0.45
             min_w_ratio, min_h_ratio = 0.01, 0.02
         elif fire_count == 2:
             # 两个火焰，中等大小
-            max_w_ratio, max_h_ratio = 0.10, 0.35
+            max_w_ratio, max_h_ratio = 0.30, 0.45
             min_w_ratio, min_h_ratio = 0.01, 0.02
         else:
             # 多个火焰，每个都应该较小
-            max_w_ratio, max_h_ratio = 0.20, 0.30
+            max_w_ratio, max_h_ratio = 0.25, 0.35
             min_w_ratio, min_h_ratio = 0.01, 0.02
         
         return {
@@ -356,8 +359,8 @@ class FireDatasetGenerator:
         fire_h, fire_w = fire_img.shape[:2]
         
         # 更严格的尺寸控制 - 确保火焰不会过大
-        max_width_ratio = 0.3   # 火焰最大宽度不超过背景的30%
-        max_height_ratio = 0.4  # 火焰最大高度不超过背景的40%
+        max_width_ratio = 0.4  # 火焰最大宽度不超过背景的30%
+        max_height_ratio = 0.5  # 火焰最大高度不超过背景的40%
         min_width_ratio = 0.05  # 火焰最小宽度不少于背景的5%
         min_height_ratio = 0.08 # 火焰最小高度不少于背景的8%
         
@@ -555,7 +558,7 @@ def main():
     
     # 生成数据集
     generator.generate_dataset(
-        num_images=100,  # 生成500张图像
+        num_images=10000,  # 生成500张图像
         fires_per_image_range=(1, 2)  # 每张图像1-2个火焰
     )
 
