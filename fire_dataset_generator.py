@@ -558,7 +558,7 @@ def main():
     
     # 生成数据集
     generator.generate_dataset(
-        num_images=10000,  # 生成500张图像
+        num_images=100,  # 生成500张图像
         fires_per_image_range=(1, 2)  # 每张图像1-2个火焰
     )
 
