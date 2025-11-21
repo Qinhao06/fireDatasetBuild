@@ -217,7 +217,7 @@ class LightNegativeDatasetGenerator:
         return light_img
 
     def blend_light_with_background(self, background, light_img, position):
-        """将光源图像混合到背景图像上"""
+        """将光源图像混合到背景图像上，并添加边缘柔光效果"""
         if light_img is None:
             return background
         
@@ -229,20 +229,100 @@ class LightNegativeDatasetGenerator:
         if x < 0 or y < 0 or x + light_w > bg_w or y + light_h > bg_h:
             return background
         
-        # 提取背景区域
-        bg_region = background[y:y+light_h, x:x+light_w]
-        
-        if light_img.shape[2] == 4:  # 有alpha通道
-            alpha = light_img[:,:,3] / 255.0
-            alpha = np.expand_dims(alpha, axis=2)
+        try:
+            # 添加边缘柔光效果（光晕）
+            # 创建一个扩展的光晕区域
+            glow_size = random.randint(15, 40)  # 光晕扩展大小
+            glow_intensity = random.uniform(0.4, 0.8)  # 光晕强度
             
-            # Alpha混合
-            light_rgb = light_img[:,:,:3]
-            blended = bg_region * (1 - alpha) + light_rgb * alpha
-            background[y:y+light_h, x:x+light_w] = blended.astype(np.uint8)
-        else:
-            # 直接覆盖（如果没有透明通道）
-            background[y:y+light_h, x:x+light_w] = light_img
+            # 计算扩展后的区域
+            glow_light_h = light_h + 2 * glow_size
+            glow_light_w = light_w + 2 * glow_size
+            
+            # 创建扩展的光源图像（包含光晕）
+            glow_light = np.zeros((glow_light_h, glow_light_w, 4), dtype=np.uint8)
+            
+            # 将原光源放在中心
+            glow_light[glow_size:glow_size+light_h, glow_size:glow_size+light_w] = light_img
+            
+            # 对扩展图像进行多次模糊，创建柔光效果
+            blur_kernel = glow_size * 2 + 1
+            if blur_kernel > glow_light_h or blur_kernel > glow_light_w:
+                blur_kernel = min(glow_light_h, glow_light_w) // 2 * 2 + 1
+            if blur_kernel < 3:
+                blur_kernel = 3
+                
+            glow_blur = cv2.GaussianBlur(glow_light, (blur_kernel, blur_kernel), glow_size//2)
+            
+            # 提取光晕的alpha通道并调整强度
+            glow_alpha = glow_blur[:,:,3].astype(np.float32) * glow_intensity / 255.0
+            glow_alpha = np.expand_dims(glow_alpha, axis=2)
+            
+            # 计算在背景上的实际位置（考虑光晕扩展）
+            glow_x = max(0, x - glow_size)
+            glow_y = max(0, y - glow_size)
+            
+            # 计算实际可以绘制的区域
+            actual_glow_w = min(glow_light_w, bg_w - glow_x)
+            actual_glow_h = min(glow_light_h, bg_h - glow_y)
+            
+            # 计算在光晕图像上的起始位置
+            src_start_x = 0 if x >= glow_size else glow_size - x
+            src_start_y = 0 if y >= glow_size else glow_size - y
+            
+            # 确保尺寸匹配
+            if actual_glow_h <= 0 or actual_glow_w <= 0:
+                return background
+            
+            # 提取背景区域
+            bg_region = background[glow_y:glow_y+actual_glow_h, glow_x:glow_x+actual_glow_w].copy()
+            
+            # 提取对应的光晕区域
+            glow_region = glow_blur[src_start_y:src_start_y+actual_glow_h, src_start_x:src_start_x+actual_glow_w]
+            glow_alpha_region = glow_alpha[src_start_y:src_start_y+actual_glow_h, src_start_x:src_start_x+actual_glow_w]
+            
+            # 确保形状匹配
+            if bg_region.shape[:2] != glow_region.shape[:2]:
+                return background
+            
+            # 先混合柔光效果
+            glow_rgb = glow_region[:,:,:3].astype(np.float32)
+            bg_region_float = bg_region.astype(np.float32)
+            blended = bg_region_float * (1 - glow_alpha_region) + glow_rgb * glow_alpha_region
+            
+            # 将混合后的区域写回背景
+            background[glow_y:glow_y+actual_glow_h, glow_x:glow_x+actual_glow_w] = blended.astype(np.uint8)
+            
+            # 再次混合原始光源（使其中心更亮）
+            if x >= 0 and y >= 0 and x + light_w <= bg_w and y + light_h <= bg_h:
+                bg_region_center = background[y:y+light_h, x:x+light_w].copy()
+                
+                if light_img.shape[2] == 4:  # 有alpha通道
+                    alpha_center = light_img[:,:,3].astype(np.float32) / 255.0
+                    alpha_center = np.expand_dims(alpha_center, axis=2)
+                    
+                    light_rgb = light_img[:,:,:3].astype(np.float32)
+                    bg_center_float = bg_region_center.astype(np.float32)
+                    blended_center = bg_center_float * (1 - alpha_center) + light_rgb * alpha_center
+                    background[y:y+light_h, x:x+light_w] = blended_center.astype(np.uint8)
+                else:
+                    # 直接覆盖（如果没有透明通道）
+                    background[y:y+light_h, x:x+light_w] = light_img
+                    
+        except Exception as e:
+            # 如果柔光处理失败，使用简单的alpha混合
+            bg_region = background[y:y+light_h, x:x+light_w]
+            
+            if light_img.shape[2] == 4:  # 有alpha通道
+                alpha = light_img[:,:,3] / 255.0
+                alpha = np.expand_dims(alpha, axis=2)
+                
+                light_rgb = light_img[:,:,:3]
+                blended = bg_region * (1 - alpha) + light_rgb * alpha
+                background[y:y+light_h, x:x+light_w] = blended.astype(np.uint8)
+            else:
+                # 直接覆盖（如果没有透明通道）
+                background[y:y+light_h, x:x+light_w] = light_img
         
         return background
 
